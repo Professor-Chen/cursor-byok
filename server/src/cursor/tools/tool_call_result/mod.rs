@@ -156,13 +156,23 @@ impl ToolResultReceiver {
     }
 }
 
+fn protobuf_json_number(value: f64) -> Value {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && (i64::MIN as f64..=i64::MAX as f64).contains(&value)
+    {
+        return Value::Number((value as i64).into());
+    }
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
 pub(super) fn prost_json(value: &prost_types::Value) -> Value {
     use prost_types::value::Kind;
     match value.kind.as_ref() {
         None | Some(Kind::NullValue(_)) => Value::Null,
-        Some(Kind::NumberValue(value)) => serde_json::Number::from_f64(*value)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
+        Some(Kind::NumberValue(value)) => protobuf_json_number(*value),
         Some(Kind::StringValue(value)) => Value::String(value.clone()),
         Some(Kind::BoolValue(value)) => Value::Bool(*value),
         Some(Kind::StructValue(value)) => Value::Object(

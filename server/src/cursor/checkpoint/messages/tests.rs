@@ -269,3 +269,48 @@ fn opaque_cursor_reasoning_signature_round_trips_without_decoding() {
     let encoded = wire_message(&projected[0], "model", None).unwrap();
     assert_eq!(encoded["content"][0]["signature"], signature);
 }
+
+#[test]
+fn multiple_reasoning_signatures_round_trip_in_order() {
+    let wire = json!({
+        "role": "assistant",
+        "id": "1",
+        "content": [
+            {"type":"reasoning", "text":"first", "signature":"sig-a"},
+            {"type":"text", "text":"answer"},
+            {"type":"reasoning", "text":"second", "signature":"sig-b"},
+        ],
+    });
+    let message = decode(
+        serde_json::to_vec(&wire).unwrap().as_slice(),
+        "cursor-root:multi".into(),
+    )
+    .unwrap();
+    let projected = project_messages(&[message]).unwrap();
+    let encoded = wire_message(&projected[0], "claude-opus", None).unwrap();
+    let content = encoded["content"].as_array().unwrap();
+    let signatures = content
+        .iter()
+        .filter(|part| part["type"] == "reasoning")
+        .map(|part| part["signature"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(signatures, ["sig-a", "sig-b"]);
+    assert_eq!(content[0]["text"], "first");
+    assert_eq!(content[1]["text"], "second");
+
+    let again = decode(
+        serde_json::to_vec(&encoded).unwrap().as_slice(),
+        "cursor-root:multi-again".into(),
+    )
+    .unwrap();
+    let MessageContent::Assistant { replay_state, .. } = &again.content else {
+        panic!("expected assistant");
+    };
+    let parts = replay_state
+        .as_ref()
+        .unwrap()
+        .cursor_reasoning_parts()
+        .unwrap();
+    assert_eq!(parts[0]["signature"], "sig-a");
+    assert_eq!(parts[1]["signature"], "sig-b");
+}

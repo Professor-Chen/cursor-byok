@@ -261,7 +261,18 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
                     .filter(|state| state.provider_kind == "openai_chat")
                     .and_then(|state| state.value.get("reasoning_content"))
                     .and_then(Value::as_str)
-                    .filter(|reasoning| !reasoning.is_empty());
+                    .filter(|reasoning| !reasoning.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let parts = replay_state
+                            .as_ref()
+                            .and_then(crate::model::ProviderReplayState::cursor_reasoning_parts)?;
+                        let reasoning = parts
+                            .iter()
+                            .filter_map(|part| part.get("text").and_then(Value::as_str))
+                            .collect::<String>();
+                        (!reasoning.is_empty()).then_some(reasoning)
+                    });
 
                 // Chat Completions rejects an empty assistant content string. Tool-call
                 // assistant messages use null content, while an assistant with no visible
@@ -278,7 +289,7 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
                     },
                 );
                 if let Some(reasoning) = replay_reasoning {
-                    value.insert("reasoning_content".into(), Value::String(reasoning.into()));
+                    value.insert("reasoning_content".into(), Value::String(reasoning));
                 }
                 if !calls.is_empty() {
                     value.insert(

@@ -379,6 +379,18 @@ fn anthropic_messages(messages: &[ProjectedMessage]) -> Result<Vec<Value>> {
                     .and_then(Value::as_array)
                 {
                     content.extend(blocks.iter().cloned());
+                } else if let Some(parts) = replay_state
+                    .as_ref()
+                    .and_then(crate::model::ProviderReplayState::cursor_reasoning_parts)
+                {
+                    content.extend(parts.iter().filter_map(|part| {
+                        let signature = part.get("signature").and_then(Value::as_str)?;
+                        Some(json!({
+                            "type": "thinking",
+                            "thinking": part.get("text").and_then(Value::as_str).unwrap_or_default(),
+                            "signature": signature,
+                        }))
+                    }));
                 }
                 if !text.is_empty() {
                     content.push(json!({"type": "text", "text": text}));

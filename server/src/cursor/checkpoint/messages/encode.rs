@@ -215,7 +215,22 @@ fn wire_content(content: &ProjectedContent, model: &str) -> Result<Value> {
             calls,
         } => {
             let mut parts = Vec::new();
-            if !thinking.is_empty() || replay_state.is_some() {
+            if let Some(reasoning_parts) = replay_state
+                .as_ref()
+                .and_then(crate::model::ProviderReplayState::cursor_reasoning_parts)
+            {
+                for part in reasoning_parts {
+                    let mut reasoning = json!({
+                        "type": "reasoning",
+                        "text": part.get("text").and_then(Value::as_str).unwrap_or_default(),
+                        "providerOptions": {"cursor": {"modelName": model}},
+                    });
+                    if let Some(signature) = part.get("signature").and_then(Value::as_str) {
+                        reasoning["signature"] = Value::String(signature.to_string());
+                    }
+                    parts.push(reasoning);
+                }
+            } else if !thinking.is_empty() || replay_state.is_some() {
                 let mut reasoning = json!({
                     "type": "reasoning",
                     "text": thinking,

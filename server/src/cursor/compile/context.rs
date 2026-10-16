@@ -512,6 +512,7 @@ pub fn dynamic_mcp(
 }
 
 fn normalize_mcp_parameters(tool_name: &str, mut parameters: Value) -> Result<Value> {
+    normalize_schema_integers(&mut parameters);
     let schema = parameters
         .as_object_mut()
         .ok_or_else(|| invalid_mcp_parameters(tool_name))?;
@@ -553,13 +554,53 @@ fn invalid_mcp_parameters(tool_name: &str) -> Error {
     ))
 }
 
+const SCHEMA_INTEGER_KEYWORDS: &[&str] = &[
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minProperties",
+    "maxProperties",
+];
+
+fn normalize_schema_integers(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                normalize_schema_integers(item);
+            }
+        }
+        Value::Object(fields) => {
+            for (key, child) in fields.iter_mut() {
+                if SCHEMA_INTEGER_KEYWORDS.contains(&key.as_str()) {
+                    if let Some(number) = child.as_f64() {
+                        *child = protobuf_json_number(number);
+                    }
+                }
+                normalize_schema_integers(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn protobuf_json_number(value: f64) -> Value {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && (i64::MIN as f64..=i64::MAX as f64).contains(&value)
+    {
+        return Value::Number((value as i64).into());
+    }
+    serde_json::Number::from_f64(value)
+        .map(Value::Number)
+        .unwrap_or(Value::Null)
+}
+
 fn prost_value(value: &prost_types::Value) -> Value {
     use prost_types::value::Kind;
     match value.kind.as_ref() {
         None | Some(Kind::NullValue(_)) => Value::Null,
-        Some(Kind::NumberValue(value)) => serde_json::Number::from_f64(*value)
-            .map(Value::Number)
-            .unwrap_or(Value::Null),
+        Some(Kind::NumberValue(value)) => protobuf_json_number(*value),
         Some(Kind::StringValue(value)) => Value::String(value.clone()),
         Some(Kind::BoolValue(value)) => Value::Bool(*value),
         Some(Kind::StructValue(value)) => Value::Object(
@@ -617,6 +658,67 @@ mod tests {
             ["  shared rule  ", "local only rule"],
             "IDE-sent duplicate is kept once and blank local rules are skipped"
         );
+    }
+
+    #[test]
+    fn protobuf_tool_schema_integer_keywords_stay_integers() {
+        use prost_types::{value::Kind, ListValue, Struct, Value as ProstValue};
+
+        fn number(value: f64) -> ProstValue {
+            ProstValue {
+                kind: Some(Kind::NumberValue(value)),
+            }
+        }
+        fn string(value: &str) -> ProstValue {
+            ProstValue {
+                kind: Some(Kind::StringValue(value.into())),
+            }
+        }
+        fn object(fields: Vec<(&str, ProstValue)>) -> ProstValue {
+            ProstValue {
+                kind: Some(Kind::StructValue(Struct {
+                    fields: fields
+                        .into_iter()
+                        .map(|(key, value)| (key.into(), value))
+                        .collect(),
+                })),
+            }
+        }
+        fn list(values: Vec<ProstValue>) -> ProstValue {
+            ProstValue {
+                kind: Some(Kind::ListValue(ListValue { values })),
+            }
+        }
+
+        let schema = object(vec![(
+            "anyOf",
+            list(vec![object(vec![
+                ("type", string("object")),
+                (
+                    "properties",
+                    object(vec![(
+                        "rootPath",
+                        object(vec![("type", string("string")), ("minLength", number(1.0))]),
+                    )]),
+                ),
+            ])]),
+        )]);
+        let tools = dynamic_mcp(
+            &pb::AgentRunRequest::default(),
+            &pb::RequestContext {
+                tools: vec![pb::McpToolDefinition {
+                    name: "cursor-app-control-move_agent_to_cloned_root".into(),
+                    description: "Move the agent into a cloned worktree.".into(),
+                    input_schema: Some(schema),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let parameters = &tools.values().next().unwrap().1.parameters;
+        let min_length = &parameters["anyOf"][0]["properties"]["rootPath"]["minLength"];
+        assert_eq!(serde_json::to_string(min_length).unwrap(), "1");
     }
 
     #[test]

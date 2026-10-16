@@ -245,13 +245,19 @@ pub async fn consume_model_cycle(
                 Some(_) => Err("provider emitted duplicate ToolCallEnd"),
                 None => Err("provider ended an unknown tool index"),
             },
-            ModelEvent::ProviderReplayState(state) => {
-                if replay_state.replace(state).is_some() {
-                    Err("provider emitted duplicate ProviderReplayState")
-                } else {
+            ModelEvent::ProviderReplayState(state) => match replay_state.take() {
+                None => {
+                    replay_state = Some(state);
                     Ok(())
                 }
-            }
+                Some(existing) => match existing.merge(state) {
+                    Ok(merged) => {
+                        replay_state = Some(merged);
+                        Ok(())
+                    }
+                    Err(message) => Err(message),
+                },
+            },
             ModelEvent::Usage(value) => {
                 if usage.replace(value).is_some() {
                     Err("provider emitted duplicate Usage")

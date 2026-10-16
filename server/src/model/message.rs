@@ -49,6 +49,116 @@ pub struct ProviderReplayState {
     pub value: Value,
 }
 
+impl ProviderReplayState {
+    /// Fold another signature from the same assistant turn into this one.
+    /// Identical states are kept once. Same-provider blocks are concatenated
+    /// in arrival order so a later Cursor turn can replay every thinking block.
+    pub fn merge(self, other: Self) -> Result<Self, &'static str> {
+        if self == other {
+            return Ok(self);
+        }
+        if self.provider_kind != other.provider_kind {
+            if self.provider_kind == "cursor_opaque" {
+                return Ok(other);
+            }
+            if other.provider_kind == "cursor_opaque" {
+                return Ok(self);
+            }
+            return Err("provider replay states disagree");
+        }
+        let value = match self.provider_kind.as_str() {
+            "anthropic" => concat_replay_array(&self.value, &other.value, "blocks"),
+            "openai_responses" => concat_replay_array(&self.value, &other.value, "items"),
+            "openai_chat" => {
+                let reasoning = format!(
+                    "{}{}",
+                    replay_text(&self.value, "reasoning_content"),
+                    replay_text(&other.value, "reasoning_content")
+                );
+                serde_json::json!({"reasoning_content": reasoning})
+            }
+            "cursor_opaque" => {
+                let mut parts = opaque_replay_parts(&self.value);
+                extend_opaque_parts(&mut parts, opaque_replay_parts(&other.value));
+                serde_json::json!({"parts": parts})
+            }
+            _ => return Err("provider replay states disagree"),
+        };
+        Ok(Self {
+            provider_kind: self.provider_kind,
+            value,
+        })
+    }
+
+    pub fn cursor_reasoning_parts(&self) -> Option<Vec<Value>> {
+        if self.provider_kind != "cursor_opaque" {
+            return None;
+        }
+        self.value.get("parts").and_then(Value::as_array).cloned()
+    }
+}
+
+fn replay_text(value: &Value, field: &str) -> String {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn concat_replay_array(left: &Value, right: &Value, field: &str) -> Value {
+    let mut items = left
+        .get(field)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(extra) = right.get(field).and_then(Value::as_array) {
+        items.extend(extra.iter().cloned());
+    }
+    serde_json::json!({ field: items })
+}
+
+fn opaque_replay_parts(value: &Value) -> Vec<Value> {
+    match value {
+        Value::String(signature) => vec![serde_json::json!({"signature": signature})],
+        _ => value
+            .get("parts")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    }
+}
+
+fn extend_opaque_parts(parts: &mut Vec<Value>, extra: Vec<Value>) {
+    for part in extra {
+        let signature = part
+            .get("signature")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let text = part
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(object) = parts
+            .last_mut()
+            .and_then(Value::as_object_mut)
+            .filter(|last| last.get("signature").and_then(Value::as_str) == signature.as_deref())
+        {
+            let combined = format!(
+                "{}{text}",
+                object
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            );
+            object.insert("text".into(), Value::String(combined));
+            continue;
+        }
+        parts.push(part);
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {

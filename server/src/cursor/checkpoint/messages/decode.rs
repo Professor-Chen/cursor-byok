@@ -171,7 +171,7 @@ fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> 
     let mut text = String::new();
     let mut thinking = String::new();
     let mut calls = Vec::new();
-    let mut replay_state = None;
+    let mut signatures = Vec::new();
     for part in value
         .get("content")
         .and_then(Value::as_array)
@@ -183,14 +183,10 @@ fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> 
                 text.push_str(part.get("text").and_then(Value::as_str).unwrap_or_default())
             }
             Some("reasoning") => {
-                thinking.push_str(part.get("text").and_then(Value::as_str).unwrap_or_default());
+                let part_text = part.get("text").and_then(Value::as_str).unwrap_or_default();
+                thinking.push_str(part_text);
                 if let Some(signature) = part.get("signature").and_then(Value::as_str) {
-                    if replay_state.is_some() {
-                        return Err(Error::Protocol(
-                            "Cursor assistant has multiple reasoning signatures".into(),
-                        ));
-                    }
-                    replay_state = Some(decode_replay_state(signature)?);
+                    signatures.push((part_text.to_string(), decode_replay_state(signature)?));
                 }
             }
             Some("tool-call") => calls.push(ToolCallContent {
@@ -207,9 +203,43 @@ fn decode_assistant(value: &Value, internal_id: &str) -> Result<MessageContent> 
         thinking,
         tool_round_id: (!calls.is_empty())
             .then(|| ToolRoundId::new(format!("{internal_id}:tool-round"))),
-        replay_state,
+        replay_state: combine_replay_states(signatures)?,
         tool_calls: calls,
     })
+}
+
+fn combine_replay_states(
+    signatures: Vec<(String, crate::model::ProviderReplayState)>,
+) -> Result<Option<crate::model::ProviderReplayState>> {
+    let mut signatures = signatures.into_iter();
+    let Some((first_text, first)) = signatures.next() else {
+        return Ok(None);
+    };
+    let mut combined = if signatures.len() == 0 {
+        return Ok(Some(first));
+    } else {
+        opaque_with_text(first, &first_text)
+    };
+    for (text, state) in signatures {
+        combined = combined
+            .merge(opaque_with_text(state, &text))
+            .map_err(|error| Error::Protocol(error.into()))?;
+    }
+    Ok(Some(combined))
+}
+
+fn opaque_with_text(
+    mut state: crate::model::ProviderReplayState,
+    text: &str,
+) -> crate::model::ProviderReplayState {
+    if state.provider_kind == "cursor_opaque" {
+        if let Value::String(signature) = state.value {
+            state.value = serde_json::json!({
+                "parts": [{"text": text, "signature": signature}]
+            });
+        }
+    }
+    state
 }
 
 fn decode_replay_state(signature: &str) -> Result<crate::model::ProviderReplayState> {
